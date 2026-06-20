@@ -192,13 +192,37 @@ function downloadText(filename, text, type = 'text/plain') {
 }
 
 function showApp() {
-  $('#adminLogin').hidden = true;
-  $('#adminShell').hidden = false;
+  const login = $('#adminLogin');
+  const shell = $('#adminShell');
+  if (login) {
+    login.hidden = true;
+    login.style.display = 'none';
+    login.setAttribute('aria-hidden', 'true');
+  }
+  if (shell) {
+    shell.hidden = false;
+    shell.style.display = '';
+    shell.removeAttribute('aria-hidden');
+  }
+  document.body.classList.add('firebase-signed-in');
+  document.body.classList.remove('firebase-signed-out');
 }
 
 function showLogin() {
-  $('#adminLogin').hidden = false;
-  $('#adminShell').hidden = true;
+  const login = $('#adminLogin');
+  const shell = $('#adminShell');
+  if (login) {
+    login.hidden = false;
+    login.style.display = '';
+    login.removeAttribute('aria-hidden');
+  }
+  if (shell) {
+    shell.hidden = true;
+    shell.style.display = 'none';
+    shell.setAttribute('aria-hidden', 'true');
+  }
+  document.body.classList.add('firebase-signed-out');
+  document.body.classList.remove('firebase-signed-in');
 }
 
 function setSection(name) {
