@@ -21,6 +21,8 @@ const prettyDate = value => {
   return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: '2-digit' });
 };
 const round2 = value => Math.round(num(value) * 100) / 100;
+const CONFIG_KEYS = ['P', 'rho', 'd_mm', 'W', 'R', 'Cp', 'H', 'F', 'Cups', 'Hups'];
+
 const calcFingerprint = result => JSON.stringify({
   customer: (result.customer || '').trim().toLowerCase(),
   model: (result.model || '').trim().toLowerCase(),
@@ -39,6 +41,7 @@ let firebaseUser = null;
 let cloudUnsubscribe = null;
 let applyingRemote = false;
 let cloudWriteTimer = null;
+let configSaveTimer = null;
 let cloudReady = false;
 let db = loadDb();
 let lastCalc = null;
@@ -50,6 +53,7 @@ function defaultDb() {
     config: { P: 7800, rho: 1.24, d_mm: 1.75, W: 120, R: 65, Cp: 95000, H: 5000, F: 0.05, Cups: 0, Hups: 0 },
     itemRecords: [],
     orders: [],
+    invoices: [],
     quotes: [],
     budget: [],
     customGroups: [],
@@ -269,10 +273,38 @@ function initDatesAndIds() {
   $('#invoiceNo').value = docId('INV');
 }
 
-function initCalculator() {
-  Object.entries(db.config || {}).forEach(([key, value]) => {
+function applyCalculatorConfigToForm(force = false) {
+  const defaults = defaultDb().config;
+  CONFIG_KEYS.forEach(key => {
     const el = $(`#${key}`);
-    if (el) el.value = value;
+    if (!el) return;
+    if (!force && document.activeElement === el) return;
+    const value = (db.config && db.config[key] !== undefined && db.config[key] !== null && db.config[key] !== '') ? db.config[key] : defaults[key];
+    el.value = value;
+  });
+}
+
+function saveCalculatorConfigFromForm(options = {}) {
+  const { render = false } = options;
+  db.config = {
+    ...(db.config || defaultDb().config),
+    ...Object.fromEntries(CONFIG_KEYS.map(key => [key, $(`#${key}`)?.value ?? '']))
+  };
+  saveDb({ render, cloud: true });
+}
+
+function scheduleCalculatorConfigSave() {
+  clearTimeout(configSaveTimer);
+  configSaveTimer = setTimeout(() => saveCalculatorConfigFromForm({ render: false }), 500);
+}
+
+function initCalculator() {
+  applyCalculatorConfigToForm(true);
+  CONFIG_KEYS.forEach(key => {
+    const el = $(`#${key}`);
+    if (!el) return;
+    el.addEventListener('input', scheduleCalculatorConfigSave);
+    el.addEventListener('change', () => saveCalculatorConfigFromForm({ render: false }));
   });
   $('#weightField').style.display = 'none';
   $('#materialMode').addEventListener('change', () => {
@@ -344,8 +376,7 @@ function calculatePrice(showMessage = false) {
   const marginRate = num($('#margin').value) / 100;
   const finalPrice = totalCost * (1 + marginRate);
 
-  db.config = Object.fromEntries(['P', 'rho', 'd_mm', 'W', 'R', 'Cp', 'H', 'F', 'Cups', 'Hups'].map(key => [key, $(`#${key}`).value]));
-  saveDb({ render: false });
+  saveCalculatorConfigFromForm({ render: false });
 
   lastCalc = {
     id: id('ITEM'),
@@ -553,15 +584,22 @@ function generateInvoice(e) {
     paidMethod: $('#billPaidMethod').value.trim()
   };
   printDocument(data);
+  const invoiceRecord = {
+    id: id('INVOICE'), createdAt: nowStamp(), invoiceNo: data.no, orderId: data.no, customer: data.customer,
+    date: data.date, subtotal: totals.subtotal, discount: totals.discount, total: totals.total,
+    advancePayment: totals.advance, balance: totals.balance, paidStatus: data.paidStatus, paidMethod: data.paidMethod,
+    totalCost: totals.cost, profit: totals.profit, items, notes: data.notes
+  };
+  db.invoices.unshift(invoiceRecord);
   db.orders.unshift({
-    id: id('ORDER'), createdAt: nowStamp(), orderId: data.no, customer: data.customer,
+    id: id('ORDER'), createdAt: invoiceRecord.createdAt, orderId: data.no, customer: data.customer,
     model: items.map(item => item.model).join(', '), datePrinted: data.date, price: totals.total,
     paidStatus: data.paidStatus, paidMethod: data.paidMethod, advancePayment: totals.advance,
-    totalCost: totals.cost, profit: totals.profit, items, notes: data.notes
+    totalCost: totals.cost, profit: totals.profit, items, notes: data.notes, invoiceId: invoiceRecord.id
   });
   saveDb();
   $('#invoiceNo').value = docId('INV');
-  toast('Invoice saved to Orders database');
+  toast('Invoice saved to Bills / Invoices and Orders databases');
 }
 
 function generateQuotation(e) {
@@ -750,7 +788,7 @@ function addSelectedToCustom() {
 
 function deleteRecord(recordId, kind) {
   if (!confirm('Delete this record?')) return;
-  const map = { item: 'itemRecords', order: 'orders', quote: 'quotes', budget: 'budget', custom: 'customRecords' };
+  const map = { item: 'itemRecords', order: 'orders', invoice: 'invoices', quote: 'quotes', budget: 'budget', custom: 'customRecords' };
   const key = map[kind];
   db[key] = db[key].filter(item => item.id !== recordId);
   saveDb();
@@ -867,6 +905,11 @@ function renderDatabaseTable() {
     headers = '<tr><th>Date</th><th>Order ID</th><th>Customer</th><th>Model</th><th>Paid</th><th>Advance</th><th>Cost</th><th>Price</th><th>Profit</th><th></th></tr>';
     body = rows.map(r => `<tr><td>${safe(r.datePrinted)}</td><td>${safe(r.orderId)}</td><td>${safe(r.customer)}</td><td>${safe(r.model)}</td><td><span class="pill-status ${String(r.paidStatus).toLowerCase()}">${safe(r.paidStatus)}</span></td><td>${money(r.advancePayment)}</td><td>${money(r.totalCost)}</td><td>${money(r.price)}</td><td>${money(r.profit)}</td><td><button class="small-btn" data-delete="${r.id}" data-kind="order">Delete</button></td></tr>`).join('');
   }
+  if (activeDbTable === 'invoices') {
+    rows = (db.invoices || []).filter(include);
+    headers = '<tr><th>Date</th><th>Invoice No</th><th>Customer</th><th>Items</th><th>Paid</th><th>Subtotal</th><th>Discount</th><th>Advance</th><th>Balance</th><th>Total</th><th></th></tr>';
+    body = rows.map(r => `<tr><td>${safe(r.date)}</td><td>${safe(r.invoiceNo || r.orderId)}</td><td>${safe(r.customer)}</td><td>${safe((r.items || []).map(i => i.model).join(', '))}</td><td><span class="pill-status ${String(r.paidStatus || '').toLowerCase()}">${safe(r.paidStatus || '-')}</span></td><td>${money(r.subtotal)}</td><td>${money(r.discount)}</td><td>${money(r.advancePayment)}</td><td>${money(r.balance)}</td><td>${money(r.total)}</td><td><button class="small-btn" data-delete="${r.id}" data-kind="invoice">Delete</button></td></tr>`).join('');
+  }
   if (activeDbTable === 'quotes') {
     rows = db.quotes.filter(include);
     headers = '<tr><th>Date</th><th>Quote No</th><th>Customer</th><th>Items</th><th>Total</th><th></th></tr>';
@@ -956,7 +999,8 @@ function renderStats() {
   if (recentEl) {
     const recent = [
       ...db.itemRecords.slice(0, 6).map(r => ({ type: 'Item', title: r.model || r.customer || '3D Printed Item', amount: r.price, date: r.createdAt || r.datePrinted })),
-      ...db.orders.slice(0, 6).map(r => ({ type: 'Order', title: r.orderId || r.customer || 'Invoice', amount: r.price, date: r.createdAt || r.datePrinted })),
+      ...db.orders.slice(0, 6).map(r => ({ type: 'Order', title: r.orderId || r.customer || 'Order', amount: r.price, date: r.createdAt || r.datePrinted })),
+      ...(db.invoices || []).slice(0, 6).map(r => ({ type: 'Invoice', title: r.invoiceNo || r.customer || 'Invoice', amount: r.total, date: r.createdAt || r.date })),
       ...db.quotes.slice(0, 6).map(r => ({ type: 'Quote', title: r.quoteNo || r.customer || 'Quotation', amount: r.total, date: r.createdAt || r.date }))
     ].sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))).slice(0, 8);
     recentEl.innerHTML = recent.map(r => `<div class="activity-item"><div><b>${safe(r.type)}</b><br><span>${safe(r.title || '-')}</span></div><div><b>${money(r.amount)}</b><br><span>${safe(r.date || '-')}</span></div></div>`).join('') || '<p class="muted">No activity yet.</p>';
@@ -967,6 +1011,7 @@ function exportActiveCsv() {
   let rows = [];
   if (activeDbTable === 'items') rows = db.itemRecords;
   if (activeDbTable === 'orders') rows = db.orders;
+  if (activeDbTable === 'invoices') rows = db.invoices || [];
   if (activeDbTable === 'quotes') rows = db.quotes;
   if (activeDbTable === 'custom') rows = db.customRecords;
   if (!rows.length) return alert('No records to export.');
@@ -985,6 +1030,7 @@ function normalizeImportedAdminDb(imported) {
     ...imported,
     itemRecords: imported.itemRecords || imported.items || [],
     orders: imported.orders || [],
+    invoices: imported.invoices || imported.bills || [],
     quotes: imported.quotes || [],
     budget: imported.budget || imported.budgetRecords || [],
     customGroups: imported.customGroups || [],
@@ -1108,12 +1154,33 @@ async function importDesktopSqlite(file) {
       notes: r.notes || 'Imported from desktop SQLite database'
     }));
     const a = upsertMany(db.itemRecords, mappedItems);
+    const mappedInvoices = mappedOrders.map(order => ({
+      id: order.id.replace('DESKTOP-ORDER-', 'DESKTOP-INVOICE-'),
+      desktopId: order.desktopId,
+      createdAt: order.createdAt,
+      invoiceNo: order.orderId,
+      orderId: order.orderId,
+      customer: order.customer,
+      date: order.datePrinted,
+      subtotal: order.price,
+      discount: 0,
+      total: order.price,
+      advancePayment: order.advancePayment,
+      balance: Math.max(0, num(order.price) - num(order.advancePayment)),
+      paidStatus: order.paidStatus,
+      paidMethod: order.paidMethod,
+      totalCost: order.totalCost,
+      profit: order.profit,
+      items: order.items || [],
+      notes: order.notes
+    }));
     const b = upsertMany(db.orders, mappedOrders);
+    const bi = upsertMany(db.invoices, mappedInvoices);
     const c = upsertMany(db.budget, mappedBudget);
     const d = upsertMany(db.customGroups, mappedGroups);
     const e = upsertMany(db.customRecords, mappedCustom);
     saveDb();
-    toast(`Desktop database imported: ${a.added + b.added + c.added + d.added + e.added} new, ${a.updated + b.updated + c.updated + d.updated + e.updated} updated`);
+    toast(`Desktop database imported: ${a.added + b.added + bi.added + c.added + d.added + e.added} new, ${a.updated + b.updated + bi.updated + c.updated + d.updated + e.updated} updated`);
   } catch (err) {
     console.error(err);
     alert('Could not import SQLite directly. Use the included tools/convert_desktop_db_to_admin_json.py converter, then import the JSON file.');
@@ -1154,6 +1221,7 @@ function initSettings() {
 }
 
 function renderAll() {
+  applyCalculatorConfigToForm(false);
   renderStats();
   renderCustomGroups();
   renderDatabaseTable();
