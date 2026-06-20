@@ -17,15 +17,19 @@
       <img src="../assets/logo.jpg" alt="Trini-D logo" />
       <span class="eyebrow">Admin Only</span>
       <h1>Trini-D Control Panel</h1>
-      <p class="muted">Enter the admin PIN to open calculator, quotation, bill and database tools.</p>
+      <p class="muted">Sign in with your Firebase admin email and password to open the cloud database tools.</p>
       <form id="loginForm" class="login-form">
         <label class="field">
-          <span>Admin PIN</span>
-          <input type="password" id="adminPin" placeholder="Enter PIN" autocomplete="current-password" required />
+          <span>Admin Email</span>
+          <input type="email" id="adminEmail" placeholder="admin email" autocomplete="username" required />
         </label>
-        <button class="btn primary" type="submit">Open Admin Panel</button>
+        <label class="field">
+          <span>Password</span>
+          <input type="password" id="adminPassword" placeholder="Firebase password" autocomplete="current-password" required />
+        </label>
+        <button class="btn primary" type="submit">Sign in to Admin Panel</button>
       </form>
-      <p class="login-note">Default PIN: <b>1234</b>. Change it inside <code>admin/admin.js</code> before publishing.</p>
+      <p class="login-note">Use the Firebase Authentication user you created. The old PIN login has been replaced by cloud login.</p>
     </div>
   </div>
 
@@ -58,6 +62,7 @@
           <h1>Admin Dashboard</h1>
         </div>
         <div class="admin-top-actions">
+          <span class="cloud-status" id="cloudStatus">Cloud: connecting...</span>
           <button class="btn ghost" id="saveSnapshotBtn" type="button">Export JSON</button>
           <button class="btn primary" data-section-jump="calculator" type="button">New Price</button>
         </div>
@@ -235,18 +240,18 @@
         <div class="admin-grid two">
           <article class="admin-card">
             <div class="card-title"><span class="eyebrow">Export</span><h2>Backup your admin database.</h2></div>
-            <p class="muted">This version stores data in the browser database/localStorage. Export JSON regularly if you use it without a server backend.</p>
+            <p class="muted">This version saves the admin database to Firebase Cloud Firestore and keeps a local browser cache for backup/offline loading.</p>
             <div class="admin-actions vertical-actions">
               <button class="btn primary" id="exportJsonBtn" type="button">Download Full JSON Backup</button>
               <label class="btn ghost file-import">Import JSON Backup<input id="importJsonInput" type="file" accept="application/json"></label>
               <label class="btn ghost file-import">Import Desktop SQLite DB<input id="importDesktopDbInput" type="file" accept=".sqlite,.sqlite3,.db,application/vnd.sqlite3,application/octet-stream"></label>
-              <button class="btn ghost danger" id="clearDbBtn" type="button">Clear Local Admin Database</button>
+              <button class="btn ghost danger" id="clearDbBtn" type="button">Clear Cloud Admin Database</button>
             </div>
-            <p class="muted import-note">Desktop DB import reads <code>trini_d_print_database.sqlite3</code> exported from the desktop software. Direct SQLite import needs internet once for the browser SQLite reader. Offline fallback: use <code>tools/convert_desktop_db_to_admin_json.py</code>, then import the generated JSON here.</p>
+            <p class="muted import-note">Desktop DB import reads <code>trini_d_print_database.sqlite3</code> exported from the desktop software. After import, records are uploaded to Firebase cloud automatically. Direct SQLite import needs internet once for the browser SQLite reader. Offline fallback: use <code>tools/convert_desktop_db_to_admin_json.py</code>, then import the generated JSON here.</p>
           </article>
           <article class="admin-card">
             <div class="card-title"><span class="eyebrow">Admin Subdomain</span><h2>Deployment note.</h2></div>
-            <p class="muted">Put this <code>admin</code> folder on a protected subdomain such as <b>admin.trini-d.com</b>. The PIN screen is only a convenience layer; real security should be done through hosting password protection, cPanel Directory Privacy, Cloudflare Access, or server login.</p>
+            <p class="muted">This admin panel is published inside <code>/admin/</code> and now uses Firebase Authentication + Cloud Firestore for realtime cloud database sync.</p>
             <div class="check-list"><div>Public website remains in the main folder.</div><div>Admin dashboard is inside <code>/admin/</code>.</div><div>Use <code>README_ADMIN_SETUP.txt</code> for setup instructions.</div></div>
           </article>
         </div>
@@ -254,6 +259,10 @@
     </main>
   </div>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+  <script src="firebase-config.js"></script>
   <script src="admin.js"></script>
 </body>
 </html>

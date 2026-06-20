@@ -1,8 +1,7 @@
 'use strict';
 
-const ADMIN_PIN = '1234';
 const STORAGE_KEY = 'trinid_admin_database_v1';
-const SESSION_KEY = 'trinid_admin_session';
+const CLOUD_DOC_PATH = 'trinid/default';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -33,6 +32,14 @@ const calcFingerprint = result => JSON.stringify({
   price: round2(result.price)
 });
 
+let firebaseApp = null;
+let firebaseAuth = null;
+let firebaseStore = null;
+let firebaseUser = null;
+let cloudUnsubscribe = null;
+let applyingRemote = false;
+let cloudWriteTimer = null;
+let cloudReady = false;
 let db = loadDb();
 let lastCalc = null;
 let activeDbTable = 'items';
@@ -59,9 +66,109 @@ function loadDb() {
   }
 }
 
-function saveDb() {
+function saveDb(options = {}) {
+  const { render = true, cloud = true } = options;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-  renderAll();
+  if (render) renderAll();
+  if (cloud && firebaseUser && firebaseStore && !applyingRemote) scheduleCloudSave();
+}
+
+function firestoreSafe(value) {
+  return JSON.parse(JSON.stringify(value ?? defaultDb()));
+}
+
+function setCloudStatus(message, state = '') {
+  const el = $('#cloudStatus');
+  if (!el) return;
+  el.textContent = message;
+  el.dataset.state = state;
+}
+
+function initFirebase() {
+  if (!window.firebase || !window.TRINID_FIREBASE_CONFIG) {
+    setCloudStatus('Cloud: Firebase SDK missing', 'error');
+    return;
+  }
+  try {
+    firebaseApp = firebase.apps && firebase.apps.length ? firebase.app() : firebase.initializeApp(window.TRINID_FIREBASE_CONFIG);
+    firebaseAuth = firebase.auth();
+    firebaseStore = firebase.firestore();
+    firebaseAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(() => {});
+    firebaseAuth.onAuthStateChanged(user => {
+      firebaseUser = user || null;
+      if (user) {
+        showApp();
+        setCloudStatus(`Cloud: signed in as ${user.email || 'admin'}`, 'ok');
+        startCloudSync();
+      } else {
+        stopCloudSync();
+        showLogin();
+        setCloudStatus('Cloud: signed out', '');
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    setCloudStatus('Cloud: setup error', 'error');
+  }
+}
+
+function startCloudSync() {
+  if (!firebaseStore || !firebaseUser) return;
+  stopCloudSync(false);
+  const ref = firebaseStore.doc(CLOUD_DOC_PATH);
+  cloudUnsubscribe = ref.onSnapshot(snapshot => {
+    if (!snapshot.exists) {
+      setCloudStatus('Cloud: creating database...', 'syncing');
+      writeCloudNow();
+      return;
+    }
+    const cloudPayload = snapshot.data() || {};
+    const remoteDb = cloudPayload.database || cloudPayload;
+    applyingRemote = true;
+    db = normalizeImportedAdminDb(remoteDb);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    renderAll();
+    applyingRemote = false;
+    cloudReady = true;
+    setCloudStatus('Cloud: realtime synced', 'ok');
+  }, err => {
+    console.error(err);
+    setCloudStatus('Cloud: sync error', 'error');
+    alert(`Firebase sync error: ${err.message || err}`);
+  });
+}
+
+function stopCloudSync(clearUserStatus = true) {
+  if (cloudUnsubscribe) {
+    cloudUnsubscribe();
+    cloudUnsubscribe = null;
+  }
+  cloudReady = false;
+  if (clearUserStatus) setCloudStatus('Cloud: disconnected', '');
+}
+
+function scheduleCloudSave() {
+  setCloudStatus('Cloud: saving...', 'syncing');
+  clearTimeout(cloudWriteTimer);
+  cloudWriteTimer = setTimeout(writeCloudNow, 350);
+}
+
+async function writeCloudNow() {
+  if (!firebaseStore || !firebaseUser || applyingRemote) return;
+  try {
+    await firebaseStore.doc(CLOUD_DOC_PATH).set({
+      database: firestoreSafe(db),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedBy: firebaseUser.email || firebaseUser.uid,
+      schemaVersion: 2
+    }, { merge: true });
+    cloudReady = true;
+    setCloudStatus('Cloud: saved', 'ok');
+  } catch (err) {
+    console.error(err);
+    setCloudStatus('Cloud: save failed', 'error');
+    alert(`Could not save to Firebase: ${err.message || err}`);
+  }
 }
 
 function toast(message) {
@@ -102,20 +209,28 @@ function setSection(name) {
 }
 
 function initAuth() {
-  if (sessionStorage.getItem(SESSION_KEY) === 'yes') showApp(); else showLogin();
-  $('#loginForm').addEventListener('submit', e => {
+  showLogin();
+  $('#loginForm').addEventListener('submit', async e => {
     e.preventDefault();
-    if ($('#adminPin').value === ADMIN_PIN) {
-      sessionStorage.setItem(SESSION_KEY, 'yes');
-      showApp();
-      toast('Admin panel unlocked');
-    } else {
-      alert('Wrong PIN. Change the default PIN in admin.js before publishing.');
+    if (!firebaseAuth) return alert('Firebase is not loaded. Check your internet connection and firebase-config.js.');
+    const email = $('#adminEmail').value.trim();
+    const password = $('#adminPassword').value;
+    try {
+      setCloudStatus('Cloud: signing in...', 'syncing');
+      await firebaseAuth.signInWithEmailAndPassword(email, password);
+      $('#adminPassword').value = '';
+      toast('Firebase admin signed in');
+    } catch (err) {
+      console.error(err);
+      setCloudStatus('Cloud: sign-in failed', 'error');
+      alert(`Firebase login failed: ${err.message || err}`);
     }
   });
-  $('#logoutBtn').addEventListener('click', () => {
-    sessionStorage.removeItem(SESSION_KEY);
+  $('#logoutBtn').textContent = 'Sign Out';
+  $('#logoutBtn').addEventListener('click', async () => {
+    if (firebaseAuth) await firebaseAuth.signOut();
     showLogin();
+    toast('Signed out');
   });
 }
 
@@ -206,7 +321,7 @@ function calculatePrice(showMessage = false) {
   const finalPrice = totalCost * (1 + marginRate);
 
   db.config = Object.fromEntries(['P', 'rho', 'd_mm', 'W', 'R', 'Cp', 'H', 'F', 'Cups', 'Hups'].map(key => [key, $(`#${key}`).value]));
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  saveDb({ render: false });
 
   lastCalc = {
     id: id('ITEM'),
@@ -1007,10 +1122,10 @@ function initSettings() {
     e.target.value = '';
   });
   $('#clearDbBtn').addEventListener('click', () => {
-    if (!confirm('This will clear all local admin database records. Continue?')) return;
+    if (!confirm('This will clear the Firebase cloud admin database and the local cache. Continue?')) return;
     db = defaultDb();
     saveDb();
-    toast('Local database cleared');
+    toast('Cloud database cleared');
   });
 }
 
@@ -1022,6 +1137,7 @@ function renderAll() {
 }
 
 function init() {
+  initFirebase();
   initAuth();
   initNavigation();
   initDatesAndIds();
